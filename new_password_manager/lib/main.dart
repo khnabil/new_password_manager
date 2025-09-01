@@ -7,17 +7,10 @@ import 'controllers/password_controller.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // Initialize Hive
   await Hive.initFlutter();
-
-  // Register the adapter for PasswordModel
   Hive.registerAdapter(PasswordModelAdapter());
-
-  // Open the passwordBox (make sure it opens correctly)
   await Hive.openBox<PasswordModel>('passwordBox');
 
-  // Run the app
   runApp(MyApp());
 }
 
@@ -40,25 +33,21 @@ class _MyAppState extends State<MyApp> {
 
   Future<void> _setupInitialScreen() async {
     try {
-      // Retrieve master password (check if it exists)
       final masterPassword = await _controller.getMasterPassword().timeout(
         Duration(seconds: 5),
         onTimeout: () => null,
       );
 
       if (masterPassword != null && masterPassword.isNotEmpty) {
-        // If master password exists, show HomeScreen
         setState(() {
           _initialScreen = HomeScreen();
         });
       } else {
-        // Otherwise, show MasterPasswordScreen
         setState(() {
           _initialScreen = MasterPasswordScreen();
         });
       }
     } catch (e) {
-      // If there's an error during master password retrieval
       print("Error during initial screen setup: $e");
       setState(() {
         _initialScreen = MasterPasswordScreen();

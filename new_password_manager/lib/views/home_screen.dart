@@ -17,25 +17,37 @@ class HomeScreen extends StatefulWidget {
 class HomeScreenState extends State<HomeScreen> {
   final PasswordController _controller = PasswordController();
   String _searchQuery = ''; // This stores the search query
+  late Box<PasswordModel> passwordBox; // Declare the password box variable
+  bool isBoxReady = false; // Flag to check if the box is ready
+
+  @override
+  void initState() {
+    super.initState();
+    _setupHiveBox(); // Ensure the Hive box is initialized when the widget is created
+  }
+
+  // Open the Hive box and handle any errors
+  void _setupHiveBox() async {
+    try {
+      // Open the Hive box for PasswordModel
+      passwordBox = await Hive.openBox<PasswordModel>('passwordBox');
+      print("Hive box opened successfully!");
+
+      // Set the state to reflect that the box is ready
+      setState(() {
+        isBoxReady = true; // Now the box is ready
+      });
+    } catch (e) {
+      print("Error opening Hive box: $e");
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final Box<PasswordModel> passwordBox = Hive.box<PasswordModel>(
-      'passwordBox',
-    );
-
-    // Filter passwords based on the search query, but show all if query is empty
-    final filteredPasswords = _searchQuery.isEmpty
-        ? passwordBox.values
-              .toList() // Show all passwords if search query is empty
-        : passwordBox.values.where((password) {
-            return password.name.toLowerCase().contains(
-                  _searchQuery.toLowerCase(),
-                ) ||
-                password.username.toLowerCase().contains(
-                  _searchQuery.toLowerCase(),
-                );
-          }).toList(); // Filter passwords if search query is not empty
+    // If the box is not ready, show a loading indicator
+    if (!isBoxReady) {
+      return Center(child: CircularProgressIndicator());
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -50,6 +62,7 @@ class HomeScreenState extends State<HomeScreen> {
                   passwordBox,
                   _searchQuery,
                   _onSearchQueryChanged,
+                  _controller,
                 ),
               );
             },
@@ -59,23 +72,27 @@ class HomeScreenState extends State<HomeScreen> {
       body: ValueListenableBuilder(
         valueListenable: passwordBox.listenable(),
         builder: (context, Box<PasswordModel> box, _) {
+          // Filter passwords based on the search query, but show all if query is empty
+          final filteredPasswords = _searchQuery.isEmpty
+              ? passwordBox.values.toList()
+              : passwordBox.values.where((password) {
+                  return password.name.toLowerCase().contains(
+                        _searchQuery.toLowerCase(),
+                      ) ||
+                      password.username.toLowerCase().contains(
+                        _searchQuery.toLowerCase(),
+                      );
+                }).toList();
+
           // If no passwords exist, show a message
           if (filteredPasswords.isEmpty) {
-            return Center(
-              child: Text(
-                "No passwords saved yet!",
-                style: TextStyle(fontSize: 18, color: Colors.grey),
-              ),
-            );
+            return Center(child: Text("No passwords saved yet!"));
           }
 
           return ListView.builder(
             itemCount: filteredPasswords.length,
             itemBuilder: (context, index) {
               final password = filteredPasswords[index];
-              final decryptedPassword = EncryptionUtil.decryptPassword(
-                password.password,
-              );
 
               return Card(
                 margin: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -89,7 +106,7 @@ class HomeScreenState extends State<HomeScreen> {
                       IconButton(
                         icon: Icon(Icons.copy, color: Colors.blue),
                         onPressed: () {
-                          _copyPasswordToClipboard(decryptedPassword);
+                          _copyPasswordToClipboard(password.password);
                         },
                       ),
                       // Edit password button
@@ -133,7 +150,24 @@ class HomeScreenState extends State<HomeScreen> {
   }
 
   // Copy decrypted password to clipboard
-  void _copyPasswordToClipboard(String decryptedPassword) {
+  void _copyPasswordToClipboard(String encryptedPassword) async {
+    final masterPassword = await _controller.getMasterPassword();
+
+    // Check if the master password is null
+    if (masterPassword == null || masterPassword.isEmpty) {
+      // If the master password is null or empty, show an error
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Master password is not set or is invalid')),
+      );
+      return; // Exit the method
+    }
+
+    // Proceed with decryption if the master password is valid
+    final decryptedPassword = EncryptionUtil.decryptPassword(
+      encryptedPassword,
+      masterPassword,
+    );
+
     Clipboard.setData(ClipboardData(text: decryptedPassword));
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -157,11 +191,13 @@ class PasswordSearchDelegate extends SearchDelegate {
   final Box<PasswordModel> passwordBox;
   final String initialSearchQuery;
   final Function(String) onSearchQueryChanged;
+  final PasswordController _controller; // Add _controller to the class
 
   PasswordSearchDelegate(
     this.passwordBox,
     this.initialSearchQuery,
     this.onSearchQueryChanged,
+    this._controller, // Accept _controller in the constructor
   );
 
   @override
@@ -189,49 +225,75 @@ class PasswordSearchDelegate extends SearchDelegate {
 
   @override
   Widget buildResults(BuildContext context) {
-    final results = passwordBox.values.where((password) {
-      return password.name.toLowerCase().contains(query.toLowerCase()) ||
-          password.username.toLowerCase().contains(query.toLowerCase());
-    }).toList();
-
-    return _buildSearchResults(results);
+    return _buildSearchResults(context);
   }
 
   @override
   Widget buildSuggestions(BuildContext context) {
+    return _buildSearchResults(context);
+  }
+
+  // Build the search results using FutureBuilder to get the master password
+  Widget _buildSearchResults(BuildContext context) {
     final results = passwordBox.values.where((password) {
       return password.name.toLowerCase().contains(query.toLowerCase()) ||
           password.username.toLowerCase().contains(query.toLowerCase());
     }).toList();
 
-    return _buildSearchResults(results);
-  }
+    if (results.isEmpty) {
+      return Center(child: Text("No results found"));
+    }
 
-  Widget _buildSearchResults(List<PasswordModel> results) {
-    if (results.isEmpty) return Center(child: Text("No results found"));
+    return FutureBuilder<String?>(
+      future: _getMasterPassword(), // Use _controller here
+      builder: (context, snapshot) {
+        // While waiting for the master password
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return Center(child: CircularProgressIndicator());
+        }
 
-    return ListView.builder(
-      itemCount: results.length,
-      itemBuilder: (context, index) {
-        final password = results[index];
-        final decryptedPassword = EncryptionUtil.decryptPassword(
-          password.password,
-        );
+        // If there was an error fetching the master password
+        if (snapshot.hasError) {
+          return Center(child: Text("Error fetching master password"));
+        }
 
-        return ListTile(
-          title: Text(password.name),
-          subtitle: Text(password.username),
-          onTap: () {
-            Clipboard.setData(ClipboardData(text: decryptedPassword));
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Password copied to clipboard!'),
-                duration: Duration(seconds: 2),
-              ),
+        // If no master password is found
+        if (!snapshot.hasData || snapshot.data!.isEmpty) {
+          return Center(child: Text("Master password not set"));
+        }
+
+        final masterPassword = snapshot.data!;
+
+        return ListView.builder(
+          itemCount: results.length,
+          itemBuilder: (context, index) {
+            final password = results[index];
+            final decryptedPassword = EncryptionUtil.decryptPassword(
+              password.password,
+              masterPassword,
+            );
+
+            return ListTile(
+              title: Text(password.name),
+              subtitle: Text(password.username),
+              onTap: () {
+                Clipboard.setData(ClipboardData(text: decryptedPassword));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('Password copied to clipboard!'),
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+              },
             );
           },
         );
       },
     );
+  }
+
+  Future<String?> _getMasterPassword() async {
+    // This method fetches the master password asynchronously
+    return await _controller.getMasterPassword();
   }
 }
